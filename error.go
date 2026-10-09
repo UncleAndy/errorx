@@ -10,13 +10,17 @@ import (
 // At the moment of creation, Error collects information based on context, creation modifiers and type it belongs to.
 // Error is mostly immutable, and distinct errors composition is achieved through wrap.
 type Error struct {
-	message     string
-	errorType   *Type
-	cause       error
-	underlying  []error
-	stackTrace  *stackTrace
-	transparent bool
-	properties  map[Property]interface{}
+	message    string
+	errorType  *Type
+	cause      error
+	stackTrace *stackTrace
+	// properties are used both for public properties inherited through "transparent" wrapping
+	// and for some optional per-instance information like "underlying errors"
+	properties *propertyMap
+
+	transparent            bool
+	hasUnderlying          bool
+	printablePropertyCount uint8
 }
 
 var _ fmt.Formatter = (*Error)(nil)
@@ -25,28 +29,39 @@ var _ fmt.Formatter = (*Error)(nil)
 // If an error already contained another value for the same property, it is overwritten.
 // It is a caller's responsibility to accumulate and update a property, if needed.
 // Dynamic properties is a brittle mechanism and should therefore be used with care and in a simple and robust manner.
+// Currently, properties are implemented as a linked list, therefore it is not safe to have many dozens of them. But couple of dozen is just ok.
 func (e *Error) WithProperty(key Property, value interface{}) *Error {
-	if e.properties == nil {
-		e.properties = make(map[Property]interface{}, 1)
+	errorCopy := *e
+	errorCopy.properties = errorCopy.properties.with(key, value)
+	if key.printable && errorCopy.printablePropertyCount < 255 {
+		errorCopy.printablePropertyCount++
 	}
-
-	e.properties[key] = value
-	return e
+	return &errorCopy
 }
 
 // WithUnderlyingErrors adds multiple additional related (hidden, suppressed) errors to be used exclusively in error output.
 // Note that these errors make no other effect whatsoever: their traits, types, properties etc. are lost on the observer.
 // Consider using errorx.DecorateMany instead.
 func (e *Error) WithUnderlyingErrors(errs ...error) *Error {
+	underlying := e.underlying()
+	newUnderlying := underlying
+
 	for _, err := range errs {
 		if err == nil {
 			continue
 		}
 
-		e.underlying = append(e.underlying, err)
+		newUnderlying = append(newUnderlying, err)
 	}
 
-	return e
+	if len(newUnderlying) == len(underlying) {
+		return e
+	}
+
+	l := len(newUnderlying) // note: l > 0, because non-increased 0 length is handled above
+	errorCopy := e.WithProperty(propertyUnderlying, newUnderlying[:l:l])
+	errorCopy.hasUnderlying = true
+	return errorCopy
 }
 
 // Property extracts a dynamic property value from an error.
@@ -56,7 +71,7 @@ func (e *Error) WithUnderlyingErrors(errs ...error) *Error {
 func (e *Error) Property(key Property) (interface{}, bool) {
 	cause := e
 	for cause != nil {
-		value, ok := cause.properties[key]
+		value, ok := cause.properties.get(key)
 		if ok {
 			return value, true
 		}
@@ -79,8 +94,7 @@ func (e *Error) HasTrait(key Trait) bool {
 	cause := e
 	for cause != nil {
 		if !cause.transparent {
-			_, ok := cause.errorType.traits[key]
-			return ok
+			return cause.errorType.HasTrait(key)
 		}
 
 		cause = Cast(cause.Cause())
@@ -89,20 +103,12 @@ func (e *Error) HasTrait(key Trait) bool {
 	return false
 }
 
-// IsOfType is a proper type check for an error.
+// IsOfType is a proper type check for an errorx-based errors.
 // It takes the transparency and error types hierarchy into account,
 // so that type check against any supertype of the original cause passes.
+// Go 1.13 and above: it also tolerates non-errorx errors in chain if those errors support errors unwrap.
 func (e *Error) IsOfType(t *Type) bool {
-	cause := e
-	for cause != nil {
-		if !cause.transparent {
-			return cause.errorType.IsOfType(t)
-		}
-
-		cause = Cast(cause.Cause())
-	}
-
-	return false
+	return e.isOfType(t)
 }
 
 // Type returns the exact type of this error.
@@ -142,12 +148,31 @@ func (e *Error) Cause() error {
 	return e.cause
 }
 
+// Is returns true if and only if target is errorx error that passes errorx type check against current error.
+// This behaviour is exactly the same as that of IsOfType().
+// See also: errors.Is()
+func (e *Error) Is(target error) bool {
+	typedTarget := Cast(target)
+	return typedTarget != nil && IsOfType(e, typedTarget.Type())
+}
+
+// From errors package: if e.Unwrap() returns a non-nil error w, then we say that e wraps w.
+// Unwrap returns cause of current error in case it is wrapped transparently, nil otherwise.
+// See also: errors.Unwrap()
+func (e *Error) Unwrap() error {
+	if e != nil && e.cause != nil && e.transparent {
+		return e.cause
+	} else {
+		return nil
+	}
+}
+
 // Format implements the Formatter interface.
 // Supported verbs:
 //
-// 		%s		simple message output
-// 		%v		same as %s
-// 		%+v		full output complete with a stack trace
+//	%s		simple message output
+//	%v		same as %s
+//	%+v		full output complete with a stack trace
 //
 // In is nearly always preferable to use %+v format.
 // If a stack trace is not required, it should be omitted at the moment of creation rather in formatting.
@@ -155,12 +180,12 @@ func (e *Error) Format(s fmt.State, verb rune) {
 	message := e.fullMessage()
 	switch verb {
 	case 'v':
-		io.WriteString(s, message)
+		_, _ = io.WriteString(s, message)
 		if s.Flag('+') {
 			e.stackTrace.Format(s, verb)
 		}
 	case 's':
-		io.WriteString(s, message)
+		_, _ = io.WriteString(s, message)
 	}
 }
 
@@ -182,34 +207,52 @@ func (e *Error) messageWithUnderlyingInfo() string {
 }
 
 func (e *Error) underlyingInfo() string {
-	if len(e.underlying) == 0 {
+	if !e.hasUnderlying {
 		return ""
 	}
 
-	infos := make([]string, 0, len(e.underlying))
-	for _, err := range e.underlying {
+	underlying := e.underlying()
+	infos := make([]string, 0, len(underlying))
+	for _, err := range underlying {
 		infos = append(infos, err.Error())
 	}
 
 	return fmt.Sprintf("(hidden: %s)", joinStringsIfNonEmpty(", ", infos...))
 }
 
-func (e *Error) messageText() string {
-	if e.Cause() == nil {
-		return e.message
+func (e *Error) messageFromProperties() string {
+	if e.printablePropertyCount == 0 {
+		return ""
 	}
-
-	underlyingFullMessage := e.Cause().Error()
-	return joinStringsIfNonEmpty(", cause: ", e.message, underlyingFullMessage)
+	uniq := make(map[Property]struct{}, e.printablePropertyCount)
+	strs := make([]string, 0, e.printablePropertyCount)
+	for m := e.properties; m != nil; m = m.next {
+		if !m.p.printable {
+			continue
+		}
+		if _, ok := uniq[m.p]; ok {
+			continue
+		}
+		uniq[m.p] = struct{}{}
+		strs = append(strs, fmt.Sprintf("%s: %v", m.p.label, m.value))
+	}
+	return "{" + strings.Join(strs, ", ") + "}"
 }
 
-func joinStringsIfNonEmpty(delimiter string, parts ...string) string {
-	filteredParts := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if len(part) > 0 {
-			filteredParts = append(filteredParts, part)
-		}
+func (e *Error) underlying() []error {
+	if !e.hasUnderlying {
+		return nil
 	}
+	// Note: properties are used as storage for optional "underlying errors".
+	// Chain of cause should not be traversed here.
+	u, _ := e.properties.get(propertyUnderlying)
+	return u.([]error)
+}
 
-	return strings.Join(filteredParts, delimiter)
+func (e *Error) messageText() string {
+	message := joinStringsIfNonEmpty(" ", e.message, e.messageFromProperties())
+	if cause := e.Cause(); cause != nil {
+		return joinStringsIfNonEmpty(", cause: ", message, cause.Error())
+	}
+	return message
 }

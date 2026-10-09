@@ -6,7 +6,7 @@ var (
 
 	// Private error type for non-errors errors, used as a not-nil substitute that cannot be type-checked directly
 	foreignType = syntheticErrors.NewType("foreign")
-	// Private error type used as a universal wrapper, meant to ann nothing at all to the error apart from some message
+	// Private error type used as a universal wrapper, meant to add nothing at all to the error apart from some message
 	transparentWrapper = syntheticErrors.NewType("decorate").ApplyModifiers(TypeModifierTransparent)
 	// Private error type used as a densely opaque wrapper which hides both the original error and its own type
 	opaqueWrapper = syntheticErrors.NewType("wrap")
@@ -22,7 +22,6 @@ func Decorate(err error, message string, args ...interface{}) *Error {
 	return NewErrorBuilder(transparentWrapper).
 		WithConditionallyFormattedMessage(message, args...).
 		WithCause(err).
-		Transparent().
 		Create()
 }
 
@@ -34,7 +33,6 @@ func EnhanceStackTrace(err error, message string, args ...interface{}) *Error {
 	return NewErrorBuilder(transparentWrapper).
 		WithConditionallyFormattedMessage(message, args...).
 		WithCause(err).
-		Transparent().
 		EnhanceStackTrace().
 		Create()
 }
@@ -50,7 +48,6 @@ func EnsureStackTrace(err error) *Error {
 	return NewErrorBuilder(stackTraceWrapper).
 		WithConditionallyFormattedMessage("").
 		WithCause(err).
-		Transparent().
 		EnhanceStackTrace().
 		Create()
 }
@@ -107,10 +104,11 @@ func areAllOfTheSameType(errs ...error) bool {
 			return false
 		}
 
-		if errorType != nil && errorType != typedError.Type() {
+		if errorType == nil {
+			errorType = typedError.Type()
+		} else if errorType != typedError.Type() {
 			return false
 		}
-		errorType = typedError.Type()
 	}
 
 	return true

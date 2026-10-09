@@ -1,4 +1,8 @@
-[![GoDoc](https://godoc.org/github.com/joomcode/errorx?status.svg)](https://godoc.org/github.com/joomcode/errorx) [![Report Card](https://goreportcard.com/badge/github.com/joomcode/errorx)](https://goreportcard.com/report/github.com/joomcode/errorx) [![gocover.io](https://gocover.io/_badge/github.com/joomcode/errorx)](https://gocover.io/github.com/joomcode/errorx)
+[![Github Actions Build Status](https://github.com/joomcode/errorx/workflows/CI/badge.svg)](https://github.com/joomcode/errorx/actions)
+[![GoDoc](https://img.shields.io/static/v1?label=godev&message=reference&color=00add8)](https://pkg.go.dev/github.com/joomcode/errorx?tab=doc)
+[![Report Card](https://goreportcard.com/badge/github.com/joomcode/errorx)](https://goreportcard.com/report/github.com/joomcode/errorx)
+[![gocover.io](https://gocover.io/_badge/github.com/joomcode/errorx)](https://gocover.io/github.com/joomcode/errorx)
+[![Mentioned in Awesome Go](https://awesome.re/mentioned-badge.svg)](https://github.com/avelino/awesome-go#error-handling)
 
 ## Highlights
 

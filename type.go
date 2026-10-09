@@ -11,7 +11,7 @@ import (
 type Type struct {
 	namespace Namespace
 	parent    *Type
-	id        int64
+	id        uint64
 	fullName  string
 	traits    map[Trait]bool
 	modifiers modifiers
@@ -56,6 +56,7 @@ func (t *Type) NewWithNoMessage() *Error {
 // The original error will not pass its dynamic properties, and those are accessible only via direct walk over Cause() chain.
 // Without args, leaves the original message intact, so a message may be generated or provided externally.
 // With args, a formatting is performed, and it is therefore expected a format string to be constant.
+// NB: Wrap is NOT the reverse of errors.Unwrap() or Error.Unwrap() method; name may be changed in future releases to avoid confusion.
 func (t *Type) Wrap(err error, message string, args ...interface{}) *Error {
 	return NewErrorBuilder(t).
 		WithConditionallyFormattedMessage(message, args...).
@@ -88,12 +89,18 @@ func (t *Type) IsOfType(other *Type) bool {
 	return false
 }
 
+// HasTrait checks if a type possesses the expected trait.
+func (t *Type) HasTrait(key Trait) bool {
+	_, ok := t.traits[key]
+	return ok
+}
+
 // IsOfType is a type check for errors.
 // Returns true either if both are of exactly the same type, or if the same is true for one of current type's ancestors.
-// For an error that does not have an errorx type, returns false.
+// Go 1.12 and below: for an error that does not have an errorx type, returns false.
+// Go 1.13 and above: for an error that does not have an errorx type, returns false unless it wraps another error of errorx type.
 func IsOfType(err error, t *Type) bool {
-	e := Cast(err)
-	return e != nil && e.IsOfType(t)
+	return isOfType(err, t)
 }
 
 // Supertype returns a parent type, if present.
@@ -106,9 +113,18 @@ func (t *Type) FullName() string {
 	return t.fullName
 }
 
+// Namespace returns a namespace this type belongs to.
+func (t *Type) Namespace() Namespace {
+	return t.namespace
+}
+
 // RootNamespace returns a base namespace this type belongs to.
 func (t *Type) RootNamespace() Namespace {
-	return t.namespace
+	n := t.namespace
+	for n.parent != nil {
+		n = *n.parent
+	}
+	return n
 }
 
 func (t *Type) String() string {

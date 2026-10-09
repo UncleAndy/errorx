@@ -12,13 +12,12 @@ type ErrorBuilder struct {
 	errorType     *Type
 	message       string
 	cause         error
-	underlying    []error
 	mode          callStackBuildMode
 	isTransparent bool
 }
 
 // NewErrorBuilder creates error builder from an existing error type.
-func NewErrorBuilder(t *Type) *ErrorBuilder {
+func NewErrorBuilder(t *Type) ErrorBuilder {
 	getMode := func() callStackBuildMode {
 		if !t.modifiers.CollectStackTrace() {
 			return stackTraceOmit
@@ -26,7 +25,7 @@ func NewErrorBuilder(t *Type) *ErrorBuilder {
 		return stackTraceCollect
 	}
 
-	return &ErrorBuilder{
+	return ErrorBuilder{
 		errorType:     t,
 		mode:          getMode(),
 		isTransparent: t.modifiers.Transparent(),
@@ -34,13 +33,17 @@ func NewErrorBuilder(t *Type) *ErrorBuilder {
 }
 
 // WithCause provides an original cause for error.
-// For non-errorx errors, a stack trace is collected.
+// For non-errorx errors, a stack trace is collected unless Type tells otherwise.
 // Otherwise, it is inherited by default, as error wrapping is typically performed 'en passe'.
 // Note that even if an original error explicitly omitted the stack trace, it could be added on wrap.
-func (eb *ErrorBuilder) WithCause(err error) *ErrorBuilder {
+func (eb ErrorBuilder) WithCause(err error) ErrorBuilder {
 	eb.cause = err
 	if Cast(err) != nil {
-		eb.mode = stackTraceBorrow
+		if eb.errorType.modifiers.CollectStackTrace() {
+			eb.mode = stackTraceBorrowOrCollect
+		} else {
+			eb.mode = stackTraceBorrowOnly
+		}
 	}
 
 	return eb
@@ -50,7 +53,7 @@ func (eb *ErrorBuilder) WithCause(err error) *ErrorBuilder {
 // Transparent wrap hides the current error type from the type checks and exposes the error type of the cause instead.
 // The same holds true for traits, and the dynamic properties are visible from both cause and transparent wrapper.
 // Note that if the cause error is non-errorx, transparency will still hold, type check against wrapper will still fail.
-func (eb *ErrorBuilder) Transparent() *ErrorBuilder {
+func (eb ErrorBuilder) Transparent() ErrorBuilder {
 	if eb.cause == nil {
 		panic("wrong builder usage: wrap modifier without non-nil cause")
 	}
@@ -64,7 +67,7 @@ func (eb *ErrorBuilder) Transparent() *ErrorBuilder {
 // This is typically a way to handle an error received from another goroutine - say, a worker pool.
 // When stack traces overlap, formatting makes a conservative attempt not to repeat itself,
 // preserving the *original* stack trace in its entirety.
-func (eb *ErrorBuilder) EnhanceStackTrace() *ErrorBuilder {
+func (eb ErrorBuilder) EnhanceStackTrace() ErrorBuilder {
 	if eb.cause == nil {
 		panic("wrong builder usage: wrap modifier without non-nil cause")
 	}
@@ -81,7 +84,7 @@ func (eb *ErrorBuilder) EnhanceStackTrace() *ErrorBuilder {
 // WithConditionallyFormattedMessage provides a message for an error in flexible format, to simplify its usages.
 // Without args, leaves the original message intact, so a message may be generated or provided externally.
 // With args, a formatting is performed, and it is therefore expected a format string to be constant.
-func (eb *ErrorBuilder) WithConditionallyFormattedMessage(message string, args ...interface{}) *ErrorBuilder {
+func (eb ErrorBuilder) WithConditionallyFormattedMessage(message string, args ...interface{}) ErrorBuilder {
 	if len(args) == 0 {
 		eb.message = message
 	} else {
@@ -92,32 +95,39 @@ func (eb *ErrorBuilder) WithConditionallyFormattedMessage(message string, args .
 }
 
 // Create returns an error with specified params.
-func (eb *ErrorBuilder) Create() *Error {
-	return &Error{
+func (eb ErrorBuilder) Create() *Error {
+	err := &Error{
 		errorType:   eb.errorType,
 		message:     eb.message,
 		cause:       eb.cause,
-		underlying:  eb.underlying,
 		transparent: eb.isTransparent,
 		stackTrace:  eb.assembleStackTrace(),
 	}
+	return err
 }
 
 type callStackBuildMode int
 
 const (
-	stackTraceCollect callStackBuildMode = 1
-	stackTraceBorrow  callStackBuildMode = 2
-	stackTraceEnhance callStackBuildMode = 3
-	stackTraceOmit    callStackBuildMode = 4
+	stackTraceCollect         callStackBuildMode = 1
+	stackTraceBorrowOrCollect callStackBuildMode = 2
+	stackTraceBorrowOnly      callStackBuildMode = 3
+	stackTraceEnhance         callStackBuildMode = 4
+	stackTraceOmit            callStackBuildMode = 5
 )
 
-func (eb *ErrorBuilder) assembleStackTrace() *stackTrace {
+func (eb ErrorBuilder) assembleStackTrace() *stackTrace {
 	switch eb.mode {
 	case stackTraceCollect:
 		return eb.collectOriginalStackTrace()
-	case stackTraceBorrow:
+	case stackTraceBorrowOnly:
 		return eb.borrowStackTraceFromCause()
+	case stackTraceBorrowOrCollect:
+		if st := eb.borrowStackTraceFromCause(); st != nil {
+			return st
+		}
+
+		return eb.collectOriginalStackTrace()
 	case stackTraceEnhance:
 		return eb.combineStackTraceWithCause()
 	case stackTraceOmit:
@@ -127,19 +137,15 @@ func (eb *ErrorBuilder) assembleStackTrace() *stackTrace {
 	}
 }
 
-func (eb *ErrorBuilder) collectOriginalStackTrace() *stackTrace {
+func (eb ErrorBuilder) collectOriginalStackTrace() *stackTrace {
 	return collectStackTrace()
 }
 
-func (eb *ErrorBuilder) borrowStackTraceFromCause() *stackTrace {
-	originalStackTrace := eb.extractStackTraceFromCause(eb.cause)
-	if originalStackTrace != nil {
-		return originalStackTrace
-	}
-	return collectStackTrace()
+func (eb ErrorBuilder) borrowStackTraceFromCause() *stackTrace {
+	return eb.extractStackTraceFromCause(eb.cause)
 }
 
-func (eb *ErrorBuilder) combineStackTraceWithCause() *stackTrace {
+func (eb ErrorBuilder) combineStackTraceWithCause() *stackTrace {
 	currentStackTrace := collectStackTrace()
 
 	originalStackTrace := eb.extractStackTraceFromCause(eb.cause)
@@ -150,7 +156,7 @@ func (eb *ErrorBuilder) combineStackTraceWithCause() *stackTrace {
 	return currentStackTrace
 }
 
-func (eb *ErrorBuilder) extractStackTraceFromCause(cause error) *stackTrace {
+func (eb ErrorBuilder) extractStackTraceFromCause(cause error) *stackTrace {
 	if typedCause := Cast(cause); typedCause != nil {
 		return typedCause.stackTrace
 	}
